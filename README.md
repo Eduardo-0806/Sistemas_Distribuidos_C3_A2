@@ -1,7 +1,7 @@
 # Kit de Partida — C3.A2: Plataforma de IA como Serviço (projeto integrador)
 
 **Sistemas Distribuídos e Computação em Nuvem · FAESA · 2026/2**
-Prof. Howard Cruz Roatti · Lançado na Aula 13 (05/11) · Entrega na Aula 17 (03/12)
+Prof. Howard Cruz Roatti · Lançado na Aula 13 (05/11) · Entrega na Aula 17 (26/11)
 
 ---
 

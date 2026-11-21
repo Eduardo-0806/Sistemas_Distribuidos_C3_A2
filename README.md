@@ -37,8 +37,9 @@ cp .env.example .env
 docker compose up --build
 ```
 
-Sobem 5 containers: `redis`, `inferencia`, `gateway` e 2 réplicas de `worker`.
-O gateway só passa a aceitar requisições depois que a inferência está saudável.
+Sobem 6 containers: `redis`, `inferencia`, `vetorial`, `gateway` e 2 réplicas de
+`worker`. O gateway só passa a aceitar requisições depois que a inferência e o
+armazenamento vetorial estão saudáveis.
 Apenas o gateway fica exposto, em `http://localhost:8000`.
 
 ### Testando (sempre pelo gateway)
@@ -61,15 +62,22 @@ curl -i -X POST http://localhost:8000/predict \
 # 3. Consulta o resultado com o id recebido (um worker processa em milissegundos)
 curl http://localhost:8000/resultado/<id> -H "Authorization: Bearer $TOKEN"
 # -> {"id": "...", "status": "pronto", "sentimento": "positivo", "confianca": 0.58, ...}
+
+# 4. Armazenamento vetorial: busca por similaridade (já vem com 3 documentos)
+curl -X POST http://localhost:8000/buscar -H "Authorization: Bearer $TOKEN"   -H "Content-Type: application/json" -d '{"pergunta":"o que diz o teorema CAP?","top_k":2}'
+
+# 5. Indexa novos documentos (persistem no volume do serviço vetorial) -> 201
+curl -X POST http://localhost:8000/documentos -H "Authorization: Bearer $TOKEN"   -H "Content-Type: application/json"   -d '[{"texto":"Circuit breaker abre apos falhas seguidas.","origem":"aula11"}]'
 ```
 
 | Situação | Resposta |
 |---|---|
 | Rota protegida sem token, ou com token inválido/expirado | `401` |
 | Texto vazio | `400` |
+| Corpo inválido em `/documentos` ou `/buscar` (lista vazia, `top_k` > 20...) | `422` |
 | `id` inexistente ou expirado (após `RESULTADO_TTL_S`) | `404` |
 | Mais de `LIMITE_REQ_POR_MIN` por usuário, ou de `LIMITE_LOGIN_POR_MIN` logins por IP | `429` + `Retry-After` |
-| Inferência fora do ar | `503` |
+| Inferência ou armazenamento vetorial fora do ar | `503` |
 
 ### Comandos úteis
 
@@ -77,8 +85,8 @@ curl http://localhost:8000/resultado/<id> -H "Authorization: Bearer $TOKEN"
 docker compose ps                        # estado e healthcheck de cada serviço
 docker compose logs -f worker            # acompanhar os workers
 docker compose up -d --scale worker=4    # mais workers consumindo a fila
-docker compose down                      # parar (mantém o volume do Redis)
-docker compose down -v                   # parar e apagar os dados do Redis
+docker compose down                      # parar (mantém os volumes de dados)
+docker compose down -v                   # parar e apagar Redis e índice vetorial
 ```
 
 Publicação na nuvem: veja [deploy/INSTRUCOES.md](deploy/INSTRUCOES.md).
@@ -98,6 +106,11 @@ Sistemas_Distribuidos_C3_A2/
 │   └── Dockerfile
 ├── worker/                 # consome a fila e roda o modelo
 │   ├── worker.py
+│   └── Dockerfile
+├── vetorial/               # armazenamento vetorial: indexa, persiste e busca
+│   ├── app.py
+│   ├── embeddings.py       # vetorização TF-IDF (offline)
+│   ├── documentos/         # base inicial indexada na primeira subida
 │   └── Dockerfile
 ├── comum/                  # modelo e fila (compartilhados por inferência e worker)
 ├── deploy/INSTRUCOES.md    # passo a passo do free tier

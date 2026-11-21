@@ -1,7 +1,7 @@
 """
 API Gateway - porta de entrada unica da plataforma.
 
-JA PRONTO: roteamento para o servico de inferencia e log de requisicoes.
+JA PRONTO: roteamento para os servicos internos e log de requisicoes.
 TAREFA 1 (feita): autenticacao por JWT.
     - POST /login  -> valida usuario/senha e emite um token JWT (HS256).
     - Rotas protegidas exigem o cabecalho "Authorization: Bearer <token>";
@@ -20,8 +20,13 @@ TAREFA 4 (feita): roteamento do fluxo assincrono (fila + worker).
                                 e o cabecalho Location: /resultado/<id>
     - GET  /resultado/{id}   -> na_fila | pronto (com o resultado) | erro;
                                 404 se nao existe/expirou
-    - O gateway repassa o status da inferencia (400, 404...) e so troca por
-      503 quando nao consegue falar com ela.
+    - O gateway repassa o status do servico (400, 404, 422...) e so troca
+      por 503 quando nao consegue falar com ele.
+Armazenamento vetorial (exigido no item 2 do edital):
+    - POST /documentos       -> indexa documentos na base vetorial (201)
+    - POST /buscar           -> top_k documentos mais parecidos com a pergunta
+    - A validacao do corpo fica no servico vetorial (dono do contrato); o
+      gateway so autentica, limita e encaminha.
 
 Configuracao (toda via variaveis de ambiente):
     JWT_SEGREDO           segredo de assinatura do token (OBRIGATORIO)
@@ -29,6 +34,7 @@ Configuracao (toda via variaveis de ambiente):
     AUTH_USUARIO          usuario aceito no /login (OBRIGATORIO)
     AUTH_SENHA            senha aceita no /login (OBRIGATORIO)
     URL_INFERENCIA        endereco do servico de inferencia
+    URL_VETORIAL          endereco do servico de armazenamento vetorial
     REDIS_URL             Redis dos contadores (vazio = memoria local)
     LIMITE_REQ_POR_MIN    requisicoes/min por usuario nas rotas protegidas (30)
     LIMITE_LOGIN_POR_MIN  tentativas de login/min por IP (10)
@@ -41,10 +47,12 @@ import os
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
 import jwt
 import requests
-from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
+from fastapi import (Body, Depends, FastAPI, HTTPException, Request, Response,
+                     status)
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 
@@ -62,6 +70,8 @@ def _env_obrigatoria(nome: str) -> str:
 
 
 URL_INFERENCIA = os.getenv("URL_INFERENCIA", "http://localhost:8001")
+URL_VETORIAL = os.getenv("URL_VETORIAL", "http://localhost:8002")
+SERVICOS = {"inferencia": URL_INFERENCIA, "vetorial": URL_VETORIAL}
 JWT_SEGREDO = _env_obrigatoria("JWT_SEGREDO")
 JWT_ALGORITMO = "HS256"
 JWT_EMISSOR = "gateway-c3a2"
@@ -218,25 +228,26 @@ def login(cred: Credenciais):
 # --------------------------------------------------------------------------
 # Rotas protegidas (exigem JWT)
 # --------------------------------------------------------------------------
-def _encaminhar(metodo: str, caminho: str, response: Response, **kwargs):
-    """Repassa a chamada para a inferencia, preservando o status da resposta.
+def _encaminhar(servico: str, metodo: str, caminho: str, response: Response,
+                **kwargs):
+    """Repassa a chamada ao servico interno, preservando o status da resposta.
 
     Usa o `response` injetado (em vez de devolver um JSONResponse) para que os
     cabecalhos de rate limit definidos na dependencia continuem na resposta.
     """
+    base = SERVICOS[servico]
     try:
-        r = requests.request(metodo, f"{URL_INFERENCIA}{caminho}",
-                             timeout=10, **kwargs)
+        r = requests.request(metodo, f"{base}{caminho}", timeout=10, **kwargs)
     except requests.RequestException as e:
         # Log so com o tipo do erro: a mensagem pode conter dados da requisicao.
-        print(f"[gateway] inferencia inacessivel: {type(e).__name__}")
+        print(f"[gateway] {servico} inacessivel: {type(e).__name__}")
         raise HTTPException(status_code=503,
-                            detail="servico de inferencia indisponivel")
+                            detail=f"servico de {servico} indisponivel")
     try:
         corpo = r.json()
     except ValueError:
         raise HTTPException(status_code=502,
-                            detail="resposta invalida do servico de inferencia")
+                            detail=f"resposta invalida do servico de {servico}")
     response.status_code = r.status_code
     return corpo
 
@@ -245,7 +256,8 @@ def _encaminhar(metodo: str, caminho: str, response: Response, **kwargs):
 def predict(entrada: Entrada, response: Response,
             claims: dict = Depends(limitar_por_usuario)):
     """Enfileira a inferencia; consulte o resultado em GET /resultado/{id}."""
-    corpo = _encaminhar("POST", "/predict", response, json=entrada.model_dump())
+    corpo = _encaminhar("inferencia", "POST", "/predict", response,
+                        json=entrada.model_dump())
     if response.status_code == status.HTTP_202_ACCEPTED and "id" in corpo:
         response.headers["Location"] = f"/resultado/{corpo['id']}"
     return corpo
@@ -255,4 +267,20 @@ def predict(entrada: Entrada, response: Response,
 def resultado(tarefa_id: uuid.UUID, response: Response,
               claims: dict = Depends(limitar_por_usuario)):
     """Status/resultado da tarefa. Id que nao e UUID -> 422 (nem chega a inferencia)."""
-    return _encaminhar("GET", f"/resultado/{tarefa_id}", response)
+    return _encaminhar("inferencia", "GET", f"/resultado/{tarefa_id}", response)
+
+
+@app.post("/documentos", status_code=status.HTTP_201_CREATED)
+def documentos(response: Response,
+               docs: Any = Body(..., examples=[[{"texto": "...", "origem": "aula"}]]),
+               claims: dict = Depends(limitar_por_usuario)):
+    """Indexa documentos no armazenamento vetorial."""
+    return _encaminhar("vetorial", "POST", "/documentos", response, json=docs)
+
+
+@app.post("/buscar")
+def buscar(response: Response,
+           consulta: Any = Body(..., examples=[{"pergunta": "o que e CAP?", "top_k": 3}]),
+           claims: dict = Depends(limitar_por_usuario)):
+    """Busca por similaridade na base vetorial."""
+    return _encaminhar("vetorial", "POST", "/buscar", response, json=consulta)

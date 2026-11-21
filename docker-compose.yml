@@ -6,10 +6,12 @@
 # segredos/limites, copie .env.example para .env: o compose le o .env sozinho.
 #
 #   cliente --HTTP--> gateway:8000 --HTTP--> inferencia:8001 --RPUSH--> redis
-#                    (JWT, rate limit)                                    |
-#                                            worker (N replicas) <--BLPOP-+
+#                    (JWT, rate limit)  |                                 |
+#                                       |    worker (N replicas) <--BLPOP-+
+#                                       |
+#                                       +--HTTP--> vetorial:8002 (indice em volume)
 #
-# So o gateway e publicado na maquina. Inferencia, worker e Redis ficam na
+# So o gateway e publicado na maquina. Os demais servicos ficam na
 # rede interna do compose e se encontram pelo NOME do servico (descoberta de
 # servicos, Aula 14) - nunca por IP fixo.
 
@@ -51,11 +53,19 @@ services:
       replicas: ${WORKER_REPLICAS:-2}
     restart: unless-stopped
 
+  vetorial:
+    build: ./vetorial
+    volumes:
+      # O indice (textos + vetores) persiste entre restarts e recriacoes.
+      - vetorial-dados:/dados
+    restart: unless-stopped
+
   gateway:
     build: ./gateway
     ports: ["${GATEWAY_PORTA:-8000}:8000"]
     environment:
       URL_INFERENCIA: http://inferencia:8001
+      URL_VETORIAL: http://vetorial:8002
       REDIS_URL: *redis-url
       JWT_SEGREDO: ${JWT_SEGREDO:-troque-este-segredo}
       JWT_EXPIRACAO_MIN: ${JWT_EXPIRACAO_MIN:-30}
@@ -67,7 +77,9 @@ services:
       redis: {condition: service_healthy}
       # So aceita trafego depois que a inferencia passou no healthcheck.
       inferencia: {condition: service_healthy}
+      vetorial: {condition: service_healthy}
     restart: unless-stopped
 
 volumes:
   redis-dados:
+  vetorial-dados:

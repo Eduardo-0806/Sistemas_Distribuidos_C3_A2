@@ -75,7 +75,7 @@ sd-2026-2-kit-c3a2/
 ├── inferencia/             # traga o seu C1.A2 para cá
 ├── worker/                 # traga o seu worker para cá
 ├── deploy/INSTRUCOES.md    # passo a passo do free tier
-├── Dockerfile.exemplo      # modelo para os demais serviços
+├── comum/                  # modelo e fila (compartilhados por inferência e worker)
 ├── docker-compose.yml      # TAREFA 4
 └── TAREFAS.md              # <- comece por aqui
 ```

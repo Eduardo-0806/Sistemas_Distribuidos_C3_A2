@@ -1,0 +1,12 @@
+# Contexto de build da raiz (inferencia/ e worker/): manda so o necessario.
+.git
+.github
+**/__pycache__
+**/*.py[cod]
+**/.venv
+**/venv
+**/*.joblib
+.env
+gateway
+deploy
+*.md

@@ -1,41 +1,73 @@
+# Plataforma de IA como Servico - sistema inteiro com UM comando:
+#
+#     docker compose up --build
+#
+# Nao precisa de .env para subir (todas as variaveis tem padrao). Para trocar
+# segredos/limites, copie .env.example para .env: o compose le o .env sozinho.
+#
+#   cliente --HTTP--> gateway:8000 --HTTP--> inferencia:8001 --RPUSH--> redis
+#                    (JWT, rate limit)                                    |
+#                                            worker (N replicas) <--BLPOP-+
+#
+# So o gateway e publicado na maquina. Inferencia, worker e Redis ficam na
+# rede interna do compose e se encontram pelo NOME do servico (descoberta de
+# servicos, Aula 14) - nunca por IP fixo.
+
+x-redis-url: &redis-url redis://redis:6379/0
+
 services:
   redis:
     image: redis:7-alpine
-    ports: ["6379:6379"]
+    # AOF: a fila e os resultados sobrevivem a um restart do Redis.
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-dados:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
+      timeout: 3s
       retries: 5
+    restart: unless-stopped
 
   inferencia:
     build: {context: ., dockerfile: inferencia/Dockerfile}
     environment:
-      - REDIS_URL=redis://redis:6379/0
+      REDIS_URL: *redis-url
+      RESULTADO_TTL_S: ${RESULTADO_TTL_S:-3600}
     depends_on:
       redis: {condition: service_healthy}
+    restart: unless-stopped
 
   worker:
     build: {context: ., dockerfile: worker/Dockerfile}
     environment:
-      - REDIS_URL=redis://redis:6379/0
+      REDIS_URL: *redis-url
+      RESULTADO_TTL_S: ${RESULTADO_TTL_S:-3600}
     depends_on:
       redis: {condition: service_healthy}
+    # Varios workers consomem a MESMA fila: cada tarefa vai para um so.
+    # Mude com WORKER_REPLICAS no .env ou: docker compose up --scale worker=4
+    deploy:
+      replicas: ${WORKER_REPLICAS:-2}
+    restart: unless-stopped
 
   gateway:
     build: ./gateway
-    ports: ["8000:8000"]
+    ports: ["${GATEWAY_PORTA:-8000}:8000"]
     environment:
-      - URL_INFERENCIA=http://inferencia:8001
-      - JWT_SEGREDO=${JWT_SEGREDO:-troque-este-segredo}
-      - JWT_EXPIRACAO_MIN=${JWT_EXPIRACAO_MIN:-30}
-      - AUTH_USUARIO=${AUTH_USUARIO:-admin}
-      - AUTH_SENHA=${AUTH_SENHA:-troque-esta-senha}
-      - REDIS_URL=redis://redis:6379/0
-      - LIMITE_REQ_POR_MIN=${LIMITE_REQ_POR_MIN:-30}
-      - LIMITE_LOGIN_POR_MIN=${LIMITE_LOGIN_POR_MIN:-10}
+      URL_INFERENCIA: http://inferencia:8001
+      REDIS_URL: *redis-url
+      JWT_SEGREDO: ${JWT_SEGREDO:-troque-este-segredo}
+      JWT_EXPIRACAO_MIN: ${JWT_EXPIRACAO_MIN:-30}
+      AUTH_USUARIO: ${AUTH_USUARIO:-admin}
+      AUTH_SENHA: ${AUTH_SENHA:-troque-esta-senha}
+      LIMITE_REQ_POR_MIN: ${LIMITE_REQ_POR_MIN:-30}
+      LIMITE_LOGIN_POR_MIN: ${LIMITE_LOGIN_POR_MIN:-10}
     depends_on:
       redis: {condition: service_healthy}
-      inferencia: {condition: service_started}
+      # So aceita trafego depois que a inferencia passou no healthcheck.
+      inferencia: {condition: service_healthy}
+    restart: unless-stopped
 
-# Observe: os servicos se referenciam pelo NOME (inferencia, redis),
-# nunca por IP fixo. Isso e descoberta de servicos. (Aula 14)
+volumes:
+  redis-dados:

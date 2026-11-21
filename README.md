@@ -20,64 +20,89 @@ para entrevista de emprego.
 
 ---
 
-## Como começar
+## Como executar do zero
+
+**Pré-requisito:** apenas [Docker](https://docs.docker.com/get-docker/) com o Compose
+(no Windows, Docker Desktop com WSL 2). Não é preciso instalar Python.
 
 ```bash
-# 1. Clone o kit e entre na pasta
-git clone https://github.com/howardroatti/sd-2026-2-kit-c3a2.git
-cd sd-2026-2-kit-c3a2
+# 1. Clone e entre na pasta
+git clone https://github.com/Eduardo-0806/Sistemas_Distribuidos_C3_A2.git
+cd Sistemas_Distribuidos_C3_A2
 
-# 2. Crie e ative o ambiente virtual
-python -m venv .venv
-# Windows:
-.venv\Scripts\activate
-# Linux/macOS:
-source .venv/bin/activate
-
-# 3. Instale as dependências
-pip install -r requirements.txt
-```
-
-```bash
-# 4. Copie o arquivo de ambiente
+# 2. (Opcional) Ajuste segredos e limites. Sem .env, valem os padrões do compose.
 cp .env.example .env
 
-# 5. Suba a stack inteira com UM comando
+# 3. Suba o sistema inteiro com UM comando
 docker compose up --build
+```
 
-# 6. Teste pelo gateway (nunca pelos serviços diretamente)
-curl http://localhost:8000/saude                      # publica
+Sobem 5 containers: `redis`, `inferencia`, `gateway` e 2 réplicas de `worker`.
+O gateway só passa a aceitar requisições depois que a inferência está saudável.
+Apenas o gateway fica exposto, em `http://localhost:8000`.
 
-# 6a. Faça login (credenciais AUTH_USUARIO / AUTH_SENHA do .env) e guarde o token
+### Testando (sempre pelo gateway)
+
+```bash
+# Rota pública
+curl http://localhost:8000/saude
+
+# 1. Login (AUTH_USUARIO / AUTH_SENHA) -> token JWT
 TOKEN=$(curl -s -X POST http://localhost:8000/login \
   -H "Content-Type: application/json" \
-  -d '{"usuario":"admin","senha":"troque-esta-senha"}' | python -c "import sys,json;print(json.load(sys.stdin)['access_token'])")
+  -d '{"usuario":"admin","senha":"troque-esta-senha"}' \
+  | python -c "import sys,json;print(json.load(sys.stdin)['access_token'])")
 
-# 6b. Rotas protegidas exigem o token (sem ele: 401).
-#     Rate limit: LIMITE_REQ_POR_MIN por usuário e LIMITE_LOGIN_POR_MIN por IP
-#     no /login; acima disso a resposta é 429 com o cabeçalho Retry-After.
-curl -X POST http://localhost:8000/predict \
+# 2. Envia o texto: a tarefa vai para a fila -> 202 {"id": "...", "status": "na_fila"}
+curl -i -X POST http://localhost:8000/predict \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" -d '{"texto":"servico excelente"}'
 
-# 7. Publique na nuvem seguindo deploy/INSTRUCOES.md
+# 3. Consulta o resultado com o id recebido (um worker processa em milissegundos)
+curl http://localhost:8000/resultado/<id> -H "Authorization: Bearer $TOKEN"
+# -> {"id": "...", "status": "pronto", "sentimento": "positivo", "confianca": 0.58, ...}
 ```
+
+| Situação | Resposta |
+|---|---|
+| Rota protegida sem token, ou com token inválido/expirado | `401` |
+| Texto vazio | `400` |
+| `id` inexistente ou expirado (após `RESULTADO_TTL_S`) | `404` |
+| Mais de `LIMITE_REQ_POR_MIN` por usuário, ou de `LIMITE_LOGIN_POR_MIN` logins por IP | `429` + `Retry-After` |
+| Inferência fora do ar | `503` |
+
+### Comandos úteis
+
+```bash
+docker compose ps                        # estado e healthcheck de cada serviço
+docker compose logs -f worker            # acompanhar os workers
+docker compose up -d --scale worker=4    # mais workers consumindo a fila
+docker compose down                      # parar (mantém o volume do Redis)
+docker compose down -v                   # parar e apagar os dados do Redis
+```
+
+Publicação na nuvem: veja [deploy/INSTRUCOES.md](deploy/INSTRUCOES.md).
 
 ---
 
 ## Estrutura do projeto
 
 ```
-sd-2026-2-kit-c3a2/
-├── gateway/
-│   ├── app.py              # TAREFAS 1 e 2 (JWT e rate limit)
-│   └── Dockerfile          # PRONTO - use de modelo
-├── inferencia/             # traga o seu C1.A2 para cá
-├── worker/                 # traga o seu worker para cá
-├── deploy/INSTRUCOES.md    # passo a passo do free tier
+Sistemas_Distribuidos_C3_A2/
+├── gateway/                # porta de entrada: JWT, rate limit, roteamento
+│   ├── app.py
+│   ├── limitador.py        # rate limit (Redis, com reserva em memória)
+│   └── Dockerfile
+├── inferencia/             # API REST que enfileira e consulta resultados
+│   ├── app.py
+│   └── Dockerfile
+├── worker/                 # consome a fila e roda o modelo
+│   ├── worker.py
+│   └── Dockerfile
 ├── comum/                  # modelo e fila (compartilhados por inferência e worker)
-├── docker-compose.yml      # TAREFA 4
-└── TAREFAS.md              # <- comece por aqui
+├── deploy/INSTRUCOES.md    # passo a passo do free tier
+├── docker-compose.yml      # o sistema inteiro com um comando
+└── TAREFAS.md
 ```
 
 ---

@@ -15,6 +15,13 @@ TAREFA 2 (feita): limite de requisicoes por cliente (rate limit), ver limitador.
     - Contadores no Redis (compartilhados entre replicas do gateway); sem
       Redis, ou com o Redis fora do ar, conta em memoria.
     - LGPD: usuario e IP viram um HMAC antes de virar chave no Redis.
+TAREFA 4 (feita): roteamento do fluxo assincrono (fila + worker).
+    - POST /predict          -> inferencia enfileira; devolve 202 + {"id"}
+                                e o cabecalho Location: /resultado/<id>
+    - GET  /resultado/{id}   -> na_fila | pronto (com o resultado) | erro;
+                                404 se nao existe/expirou
+    - O gateway repassa o status da inferencia (400, 404...) e so troca por
+      503 quando nao consegue falar com ela.
 
 Configuracao (toda via variaveis de ambiente):
     JWT_SEGREDO           segredo de assinatura do token (OBRIGATORIO)
@@ -32,6 +39,7 @@ import hashlib
 import hmac
 import os
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 
 import jwt
@@ -210,13 +218,41 @@ def login(cred: Credenciais):
 # --------------------------------------------------------------------------
 # Rotas protegidas (exigem JWT)
 # --------------------------------------------------------------------------
-@app.post("/predict")
-def predict(entrada: Entrada, claims: dict = Depends(limitar_por_usuario)):
+def _encaminhar(metodo: str, caminho: str, response: Response, **kwargs):
+    """Repassa a chamada para a inferencia, preservando o status da resposta.
+
+    Usa o `response` injetado (em vez de devolver um JSONResponse) para que os
+    cabecalhos de rate limit definidos na dependencia continuem na resposta.
+    """
     try:
-        r = requests.post(f"{URL_INFERENCIA}/predict",
-                          json=entrada.model_dump(), timeout=10)
-        r.raise_for_status()
-        return r.json()
+        r = requests.request(metodo, f"{URL_INFERENCIA}{caminho}",
+                             timeout=10, **kwargs)
     except requests.RequestException as e:
+        # Log so com o tipo do erro: a mensagem pode conter dados da requisicao.
+        print(f"[gateway] inferencia inacessivel: {type(e).__name__}")
         raise HTTPException(status_code=503,
-                            detail=f"servico de inferencia indisponivel: {e}")
+                            detail="servico de inferencia indisponivel")
+    try:
+        corpo = r.json()
+    except ValueError:
+        raise HTTPException(status_code=502,
+                            detail="resposta invalida do servico de inferencia")
+    response.status_code = r.status_code
+    return corpo
+
+
+@app.post("/predict", status_code=status.HTTP_202_ACCEPTED)
+def predict(entrada: Entrada, response: Response,
+            claims: dict = Depends(limitar_por_usuario)):
+    """Enfileira a inferencia; consulte o resultado em GET /resultado/{id}."""
+    corpo = _encaminhar("POST", "/predict", response, json=entrada.model_dump())
+    if response.status_code == status.HTTP_202_ACCEPTED and "id" in corpo:
+        response.headers["Location"] = f"/resultado/{corpo['id']}"
+    return corpo
+
+
+@app.get("/resultado/{tarefa_id}")
+def resultado(tarefa_id: uuid.UUID, response: Response,
+              claims: dict = Depends(limitar_por_usuario)):
+    """Status/resultado da tarefa. Id que nao e UUID -> 422 (nem chega a inferencia)."""
+    return _encaminhar("GET", f"/resultado/{tarefa_id}", response)

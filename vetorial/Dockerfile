@@ -23,7 +23,8 @@ COPY documentos/ documentos/
 RUN useradd --create-home --uid 10001 app \
  && mkdir -p /dados && chown app:app /dados
 USER app
-VOLUME ["/dados"]
+# Sem instrucao VOLUME: o Railway rejeita (usa Railway Volumes). O volume
+# e declarado no docker-compose.yml (local) e anexado em /dados no Railway.
 
 EXPOSE 8002
 HEALTHCHECK --interval=10s --timeout=3s --start-period=20s --retries=3 \

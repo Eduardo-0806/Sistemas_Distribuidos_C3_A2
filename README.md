@@ -22,7 +22,8 @@ para entrevista de emprego.
 
 ## Plataforma publicada
 
-**URL pública (Railway, HTTPS):** `https://<preencher-apos-deploy>.up.railway.app`
+**URL pública (Railway, HTTPS):** <https://gateway-production-e512e82f.up.railway.app>  
+(saúde: [https://gateway-production-e512e82f.up.railway.app/saude](https://gateway-production-e512e82f.up.railway.app/saude) · documentação interativa: [https://gateway-production-e512e82f.up.railway.app/docs](https://gateway-production-e512e82f.up.railway.app/docs))
 
 Os 5 serviços + Redis rodam no Railway com a mesma arquitetura do compose; só o
 gateway é público, os demais usam a rede privada do Railway. Passo a passo em

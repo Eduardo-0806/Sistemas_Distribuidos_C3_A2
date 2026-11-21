@@ -48,14 +48,14 @@ def main():
         checar("HTTPS", True, "(certificado valido)")
 
     st, _ = chamar("POST", f"{base}/predict", {"texto": "teste"})
-    checar("rota protegida sem token -> 401", st == 401, f"-> {st}")
+    checar("rota protegida sem token", st == 401, f"-> {st}")
 
     st, corpo = chamar("POST", f"{base}/login", {"usuario": usuario, "senha": senha})
     checar("POST /login", st == 200 and "access_token" in corpo, f"-> {st}")
     token = corpo["access_token"]
 
     st, corpo = chamar("POST", f"{base}/predict", {"texto": "servico excelente"}, token)
-    checar("POST /predict -> 202 (na fila)", st == 202 and "id" in corpo, f"-> {st}")
+    checar("POST /predict (na fila)", st == 202 and "id" in corpo, f"-> {st}")
     tarefa = corpo["id"]
 
     inicio, status = time.time(), None

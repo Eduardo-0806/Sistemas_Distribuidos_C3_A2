@@ -20,6 +20,20 @@ para entrevista de emprego.
 
 ---
 
+## Plataforma publicada
+
+**URL pública (Railway, HTTPS):** `https://<preencher-apos-deploy>.up.railway.app`
+
+Os 5 serviços + Redis rodam no Railway com a mesma arquitetura do compose; só o
+gateway é público, os demais usam a rede privada do Railway. Passo a passo em
+[deploy/INSTRUCOES.md](deploy/INSTRUCOES.md). Teste ponta a ponta:
+
+```bash
+python deploy/testar_deploy.py https://<url-publica> admin <senha>
+```
+
+---
+
 ## Como executar do zero
 
 **Pré-requisito:** apenas [Docker](https://docs.docker.com/get-docker/) com o Compose
@@ -113,7 +127,7 @@ Sistemas_Distribuidos_C3_A2/
 │   ├── documentos/         # base inicial indexada na primeira subida
 │   └── Dockerfile
 ├── comum/                  # modelo e fila (compartilhados por inferência e worker)
-├── deploy/INSTRUCOES.md    # passo a passo do free tier
+├── deploy/                 # passo a passo do Railway + testar_deploy.py
 ├── docker-compose.yml      # o sistema inteiro com um comando
 └── TAREFAS.md
 ```

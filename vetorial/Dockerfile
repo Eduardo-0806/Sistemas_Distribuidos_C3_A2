@@ -29,4 +29,6 @@ EXPOSE 8002
 HEALTHCHECK --interval=10s --timeout=3s --start-period=20s --retries=3 \
   CMD python -c "import os,urllib.request; urllib.request.urlopen(f'http://localhost:{os.environ[\"PORT\"]}/saude', timeout=2)"
 
-CMD ["sh", "-c", "exec uvicorn app:app --host 0.0.0.0 --port ${PORT}"]
+# HOST e PORT vem do ambiente. Local: 0.0.0.0 (IPv4). No Railway use HOST=::
+# (rede privada *.railway.internal; no Linux "::" aceita IPv4 e IPv6).
+CMD ["sh", "-c", "exec uvicorn app:app --host ${HOST:-0.0.0.0} --port ${PORT}"]

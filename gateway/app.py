@@ -7,17 +7,28 @@ TAREFA 1 (feita): autenticacao por JWT.
     - Rotas protegidas exigem o cabecalho "Authorization: Bearer <token>";
       sem token, ou com token invalido/expirado, a resposta e 401.
     - /saude continua publica (usada por healthcheck do compose e da nuvem).
-TAREFA 2: limite de requisicoes por cliente (rate limit).
+TAREFA 2 (feita): limite de requisicoes por cliente (rate limit), ver limitador.py.
+    - Rotas protegidas: limite por USUARIO autenticado (claim "sub" do JWT).
+    - /login: limite por IP (freia tentativa de senha por forca bruta).
+    - Estourou -> 429 com Retry-After. Toda resposta limitada traz os
+      cabecalhos X-RateLimit-Limit / -Remaining / -Reset.
+    - Contadores no Redis (compartilhados entre replicas do gateway); sem
+      Redis, ou com o Redis fora do ar, conta em memoria.
+    - LGPD: usuario e IP viram um HMAC antes de virar chave no Redis.
 
 Configuracao (toda via variaveis de ambiente):
-    JWT_SEGREDO         segredo de assinatura do token (OBRIGATORIO)
-    JWT_EXPIRACAO_MIN   validade do token em minutos (padrao: 30)
-    AUTH_USUARIO        usuario aceito no /login (OBRIGATORIO)
-    AUTH_SENHA          senha aceita no /login (OBRIGATORIO)
-    URL_INFERENCIA      endereco do servico de inferencia
+    JWT_SEGREDO           segredo de assinatura do token (OBRIGATORIO)
+    JWT_EXPIRACAO_MIN     validade do token em minutos (padrao: 30)
+    AUTH_USUARIO          usuario aceito no /login (OBRIGATORIO)
+    AUTH_SENHA            senha aceita no /login (OBRIGATORIO)
+    URL_INFERENCIA        endereco do servico de inferencia
+    REDIS_URL             Redis dos contadores (vazio = memoria local)
+    LIMITE_REQ_POR_MIN    requisicoes/min por usuario nas rotas protegidas (30)
+    LIMITE_LOGIN_POR_MIN  tentativas de login/min por IP (10)
 
 Rodar: uvicorn app:app --port 8000
 """
+import hashlib
 import hmac
 import os
 import time
@@ -25,9 +36,11 @@ from datetime import datetime, timedelta, timezone
 
 import jwt
 import requests
-from fastapi import Depends, FastAPI, HTTPException, Request, status
+from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
+
+from limitador import criar_limitador
 
 
 def _env_obrigatoria(nome: str) -> str:
@@ -47,6 +60,10 @@ JWT_EMISSOR = "gateway-c3a2"
 JWT_EXPIRACAO_MIN = int(os.getenv("JWT_EXPIRACAO_MIN", "30"))
 AUTH_USUARIO = _env_obrigatoria("AUTH_USUARIO")
 AUTH_SENHA = _env_obrigatoria("AUTH_SENHA")
+LIMITE_REQ_POR_MIN = int(os.getenv("LIMITE_REQ_POR_MIN", "30"))
+LIMITE_LOGIN_POR_MIN = int(os.getenv("LIMITE_LOGIN_POR_MIN", "10"))
+JANELA_LIMITE_S = 60
+limitador = criar_limitador(os.getenv("REDIS_URL", "").strip())
 
 app = FastAPI(title="Gateway - C3.A2")
 
@@ -113,6 +130,50 @@ def exigir_token(
 
 
 # --------------------------------------------------------------------------
+# Rate limit
+# --------------------------------------------------------------------------
+def _anonimizar(valor: str) -> str:
+    """HMAC do identificador: o Redis nunca guarda usuario ou IP em claro."""
+    return hmac.new(JWT_SEGREDO.encode(), valor.encode(),
+                    hashlib.sha256).hexdigest()[:24]
+
+
+def _aplicar_limite(escopo: str, identificador: str, limite: int,
+                    response: Response) -> None:
+    res = limitador.registrar(f"{escopo}:{_anonimizar(identificador)}",
+                              limite, JANELA_LIMITE_S)
+    cabecalhos = {
+        "X-RateLimit-Limit": str(res.limite),
+        "X-RateLimit-Remaining": str(res.restantes),
+        "X-RateLimit-Reset": str(res.reset_em),
+    }
+    if not res.permitido:
+        cabecalhos["Retry-After"] = str(res.reset_em)
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"limite de {res.limite} requisicoes por minuto excedido; "
+                   f"tente novamente em {res.reset_em}s",
+            headers=cabecalhos,
+        )
+    response.headers.update(cabecalhos)
+
+
+def limitar_por_usuario(response: Response,
+                        claims: dict = Depends(exigir_token)) -> dict:
+    """Autentica (401) e depois aplica o limite do usuario (429)."""
+    _aplicar_limite("api", claims["sub"], LIMITE_REQ_POR_MIN, response)
+    return claims
+
+
+def limitar_por_ip(request: Request, response: Response) -> None:
+    # Atras de proxy (Render/Railway) o IP real vem do X-Forwarded-For; o
+    # uvicorn so confia nesse cabecalho se o proxy estiver em
+    # FORWARDED_ALLOW_IPS (configurar no deploy, TAREFA 5).
+    ip = request.client.host if request.client else "desconhecido"
+    _aplicar_limite("login", ip, LIMITE_LOGIN_POR_MIN, response)
+
+
+# --------------------------------------------------------------------------
 # Middleware de log (sem dados pessoais: so metodo, rota, status e tempo)
 # --------------------------------------------------------------------------
 @app.middleware("http")
@@ -133,7 +194,8 @@ def saude():
     return {"status": "ok"}
 
 
-@app.post("/login", response_model=Token)
+@app.post("/login", response_model=Token,
+          dependencies=[Depends(limitar_por_ip)])
 def login(cred: Credenciais):
     # compare_digest: comparacao em tempo constante (evita ataque de timing).
     usuario_ok = hmac.compare_digest(cred.usuario.encode(), AUTH_USUARIO.encode())
@@ -149,8 +211,7 @@ def login(cred: Credenciais):
 # Rotas protegidas (exigem JWT)
 # --------------------------------------------------------------------------
 @app.post("/predict")
-def predict(entrada: Entrada, claims: dict = Depends(exigir_token)):
-    # TAREFA 2: aplicar limite de requisicoes por cliente (claims["sub"]).
+def predict(entrada: Entrada, claims: dict = Depends(limitar_por_usuario)):
     try:
         r = requests.post(f"{URL_INFERENCIA}/predict",
                           json=entrada.model_dump(), timeout=10)

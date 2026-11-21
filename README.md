@@ -53,7 +53,9 @@ TOKEN=$(curl -s -X POST http://localhost:8000/login \
   -H "Content-Type: application/json" \
   -d '{"usuario":"admin","senha":"troque-esta-senha"}' | python -c "import sys,json;print(json.load(sys.stdin)['access_token'])")
 
-# 6b. Rotas protegidas exigem o token (sem ele: 401)
+# 6b. Rotas protegidas exigem o token (sem ele: 401).
+#     Rate limit: LIMITE_REQ_POR_MIN por usuário e LIMITE_LOGIN_POR_MIN por IP
+#     no /login; acima disso a resposta é 429 com o cabeçalho Retry-After.
 curl -X POST http://localhost:8000/predict \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" -d '{"texto":"servico excelente"}'

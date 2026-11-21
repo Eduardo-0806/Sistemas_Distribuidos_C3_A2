@@ -5,24 +5,13 @@ Rodar (dentro de gateway/):
     pip install -r requirements.txt -r requirements-dev.txt
     pytest -q
 """
-import os
-import sys
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
 import jwt
 import pytest
+from fastapi.testclient import TestClient
 
-os.environ.update(
-    JWT_SEGREDO="segredo-de-teste-com-tamanho-suficiente-123",
-    AUTH_USUARIO="aluno",
-    AUTH_SENHA="senha-teste",
-    JWT_EXPIRACAO_MIN="5",
-)
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
-import app as gateway  # noqa: E402
-from fastapi.testclient import TestClient  # noqa: E402
+import app as gateway  # ambiente configurado em conftest.py
 
 cliente = TestClient(gateway.app)
 

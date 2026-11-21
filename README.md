@@ -46,8 +46,16 @@ cp .env.example .env
 docker compose up --build
 
 # 6. Teste pelo gateway (nunca pelos serviços diretamente)
-curl http://localhost:8000/saude
+curl http://localhost:8000/saude                      # publica
+
+# 6a. Faça login (credenciais AUTH_USUARIO / AUTH_SENHA do .env) e guarde o token
+TOKEN=$(curl -s -X POST http://localhost:8000/login \
+  -H "Content-Type: application/json" \
+  -d '{"usuario":"admin","senha":"troque-esta-senha"}' | python -c "import sys,json;print(json.load(sys.stdin)['access_token'])")
+
+# 6b. Rotas protegidas exigem o token (sem ele: 401)
 curl -X POST http://localhost:8000/predict \
+  -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" -d '{"texto":"servico excelente"}'
 
 # 7. Publique na nuvem seguindo deploy/INSTRUCOES.md

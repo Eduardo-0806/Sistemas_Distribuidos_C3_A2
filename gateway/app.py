@@ -51,6 +51,7 @@ from typing import Any
 
 import jwt
 import requests
+from opentelemetry import trace
 from fastapi import (Body, Depends, FastAPI, HTTPException, Request, Response,
                      status)
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -229,6 +230,9 @@ async def registrar(request: Request, call_next):
     inicio = time.time()
     resposta = await call_next(request)
     ms = (time.time() - inicio) * 1000
+    contexto = trace.get_current_span().get_span_context()
+    if contexto.is_valid:
+        resposta.headers["X-Trace-Id"] = f"{contexto.trace_id:032x}"
     print(f"[gateway] {request.method} {request.url.path} "
           f"-> {resposta.status_code} ({ms:.1f}ms)")
     return resposta

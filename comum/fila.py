@@ -12,9 +12,12 @@ LGPD: todo resultado expira sozinho apos RESULTADO_TTL_S segundos
 """
 import json
 import os
+import time
 import uuid
 
 import redis
+from opentelemetry import propagate, trace
+from opentelemetry.trace import SpanKind
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 RESULTADO_TTL_S = int(os.getenv("RESULTADO_TTL_S", "3600"))
@@ -22,6 +25,7 @@ FILA_TAREFAS = "tarefas"
 PREFIXO_RESULTADO = "resultado:"
 
 _cliente = None
+_tracer = trace.get_tracer("plataforma.fila")
 
 
 def cliente() -> "redis.Redis":
@@ -35,11 +39,25 @@ def cliente() -> "redis.Redis":
 def enfileirar(texto: str) -> str:
     """Coloca uma tarefa na fila e devolve o id para consulta posterior."""
     tarefa_id = str(uuid.uuid4())
-    # Grava o status ANTES de enfileirar: assim o worker nunca termina uma
-    # tarefa cujo status "na_fila" ainda vai ser escrito (e sobrescrito) depois.
-    cliente().set(PREFIXO_RESULTADO + tarefa_id,
-                  json.dumps({"status": "na_fila"}), ex=RESULTADO_TTL_S)
-    cliente().rpush(FILA_TAREFAS, json.dumps({"id": tarefa_id, "texto": texto}))
+    with _tracer.start_as_current_span(
+            "fila.publicar", kind=SpanKind.PRODUCER,
+            attributes={"messaging.system": "redis",
+                        "messaging.destination.name": FILA_TAREFAS,
+                        "task.id": tarefa_id}) as span:
+        contexto = {}
+        propagate.inject(contexto)
+        tarefa = {
+            "id": tarefa_id,
+            "texto": texto,
+            "trace_context": contexto,
+            "enfileirada_em_ns": time.time_ns(),
+        }
+        # Grava o status ANTES de enfileirar: assim o worker nunca termina uma
+        # tarefa cujo status "na_fila" ainda vai ser escrito (e sobrescrito) depois.
+        cliente().set(PREFIXO_RESULTADO + tarefa_id,
+                      json.dumps({"status": "na_fila"}), ex=RESULTADO_TTL_S)
+        cliente().rpush(FILA_TAREFAS, json.dumps(tarefa))
+        span.set_attribute("messaging.operation.name", "publish")
     return tarefa_id
 
 

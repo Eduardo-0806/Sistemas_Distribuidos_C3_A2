@@ -27,4 +27,4 @@ HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
   CMD python -c "from comum import fila; fila.cliente().ping()"
 
 # Forma exec: o python e o PID 1 e trata o SIGTERM (encerramento limpo).
-CMD ["python", "worker.py"]
+CMD ["opentelemetry-instrument", "python", "worker.py"]

@@ -19,11 +19,14 @@ import signal
 import time
 
 import redis
+from opentelemetry import propagate, trace
+from opentelemetry.trace import SpanKind
 
 from comum import fila
 from comum.modelo import carregar_modelo
 
 _rodando = True
+_tracer = trace.get_tracer("plataforma.worker")
 
 
 def _parar(signum, _frame):
@@ -66,7 +69,28 @@ def main():
             continue
         if tarefa is None:
             continue
-        r = processar(modelo, tarefa)
+        contexto = propagate.extract(tarefa.get("trace_context", {}))
+        enfileirada_em_ns = tarefa.get("enfileirada_em_ns")
+        if enfileirada_em_ns:
+            # Span retrospectivo: mede o tempo entre RPUSH e o consumo (BLPOP).
+            fim_espera_ns = time.time_ns()
+            espera_ms = max(0.0, (fim_espera_ns - enfileirada_em_ns) / 1_000_000)
+            with _tracer.start_as_current_span(
+                    "fila.espera", context=contexto, kind=SpanKind.CONSUMER,
+                    start_time=enfileirada_em_ns,
+                    attributes={"messaging.system": "redis",
+                                "messaging.destination.name": fila.FILA_TAREFAS,
+                                "messaging.operation.name": "receive",
+                                "messaging.queue.wait_ms": espera_ms,
+                                "task.id": tarefa["id"]}):
+                pass
+        with _tracer.start_as_current_span(
+                "worker.processar", context=contexto, kind=SpanKind.CONSUMER,
+                attributes={"messaging.system": "redis",
+                            "messaging.destination.name": fila.FILA_TAREFAS,
+                            "messaging.operation.name": "process",
+                            "task.id": tarefa["id"]}):
+            r = processar(modelo, tarefa)
         # Log sem dados pessoais: so id, status e tempo.
         print(f"[worker] tarefa {tarefa['id']} -> {r['status']} "
               f"({r.get('tempo_ms', '-')}ms)")

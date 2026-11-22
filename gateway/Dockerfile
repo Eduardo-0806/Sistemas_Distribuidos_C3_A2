@@ -25,4 +25,4 @@ HEALTHCHECK --interval=10s --timeout=3s --start-period=10s --retries=3 \
 
 # HOST e PORT vem do ambiente. Local: 0.0.0.0 (IPv4). No Railway use HOST=::
 # (rede privada *.railway.internal; no Linux "::" aceita IPv4 e IPv6).
-CMD ["sh", "-c", "exec uvicorn app:app --host ${HOST:-0.0.0.0} --port ${PORT}"]
+CMD ["sh", "-c", "exec opentelemetry-instrument uvicorn app:app --host ${HOST:-0.0.0.0} --port ${PORT}"]

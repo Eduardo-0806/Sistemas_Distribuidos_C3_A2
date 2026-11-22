@@ -11,13 +11,27 @@
 #                                       |
 #                                       +--HTTP--> vetorial:8002 (indice em volume)
 #
-# So o gateway e publicado na maquina. Os demais servicos ficam na
-# rede interna do compose e se encontram pelo NOME do servico (descoberta de
-# servicos, Aula 14) - nunca por IP fixo.
+# A API do gateway fica em 8000; a interface local do Jaeger fica em 16686.
+# Os servicos de aplicacao ficam na rede interna e se encontram pelo NOME do
+# servico (descoberta de servicos, Aula 14) - nunca por IP fixo.
 
 x-redis-url: &redis-url redis://redis:6379/0
+x-otel-env: &otel-env
+  OTEL_TRACES_EXPORTER: ${OTEL_TRACES_EXPORTER:-otlp}
+  OTEL_METRICS_EXPORTER: none
+  OTEL_LOGS_EXPORTER: none
+  OTEL_EXPORTER_OTLP_PROTOCOL: ${OTEL_EXPORTER_OTLP_PROTOCOL:-http/protobuf}
+  OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://jaeger:4318}
+  OTEL_PROPAGATORS: tracecontext,baggage
+  OTEL_PYTHON_INSTRUMENTATION_SANITIZE_REDIS: "true"
+  OTEL_PYTHON_FASTAPI_EXCLUDED_URLS: .*/saude
 
 services:
+  jaeger:
+    image: cr.jaegertracing.io/jaegertracing/jaeger:2.23.0
+    ports: ["16686:16686"]
+    restart: unless-stopped
+
   redis:
     image: redis:7-alpine
     # AOF: a fila e os resultados sobrevivem a um restart do Redis.
@@ -34,19 +48,25 @@ services:
   inferencia:
     build: {context: ., dockerfile: inferencia/Dockerfile}
     environment:
+      <<: *otel-env
+      OTEL_SERVICE_NAME: inferencia
       REDIS_URL: *redis-url
       RESULTADO_TTL_S: ${RESULTADO_TTL_S:-3600}
     depends_on:
       redis: {condition: service_healthy}
+      jaeger: {condition: service_started}
     restart: unless-stopped
 
   worker:
     build: {context: ., dockerfile: worker/Dockerfile}
     environment:
+      <<: *otel-env
+      OTEL_SERVICE_NAME: worker
       REDIS_URL: *redis-url
       RESULTADO_TTL_S: ${RESULTADO_TTL_S:-3600}
     depends_on:
       redis: {condition: service_healthy}
+      jaeger: {condition: service_started}
     # Varios workers consomem a MESMA fila: cada tarefa vai para um so.
     # Mude com WORKER_REPLICAS no .env ou: docker compose up --scale worker=4
     deploy:
@@ -55,6 +75,11 @@ services:
 
   vetorial:
     build: ./vetorial
+    environment:
+      <<: *otel-env
+      OTEL_SERVICE_NAME: vetorial
+    depends_on:
+      jaeger: {condition: service_started}
     volumes:
       # O indice (textos + vetores) persiste entre restarts e recriacoes.
       - vetorial-dados:/dados
@@ -64,6 +89,8 @@ services:
     build: ./gateway
     ports: ["${GATEWAY_PORTA:-8000}:8000"]
     environment:
+      <<: *otel-env
+      OTEL_SERVICE_NAME: gateway
       URL_INFERENCIA: http://inferencia:8001
       URL_VETORIAL: http://vetorial:8002
       REDIS_URL: *redis-url
@@ -84,6 +111,7 @@ services:
       # So aceita trafego depois que a inferencia passou no healthcheck.
       inferencia: {condition: service_healthy}
       vetorial: {condition: service_healthy}
+      jaeger: {condition: service_started}
     restart: unless-stopped
 
 volumes:

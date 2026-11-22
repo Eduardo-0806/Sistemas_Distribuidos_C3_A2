@@ -73,6 +73,12 @@ services:
       AUTH_SENHA: ${AUTH_SENHA:-troque-esta-senha}
       LIMITE_REQ_POR_MIN: ${LIMITE_REQ_POR_MIN:-30}
       LIMITE_LOGIN_POR_MIN: ${LIMITE_LOGIN_POR_MIN:-10}
+      SERVICO_TIMEOUT_S: ${SERVICO_TIMEOUT_S:-10}
+      SERVICO_MAX_TENTATIVAS: ${SERVICO_MAX_TENTATIVAS:-3}
+      SERVICO_BACKOFF_INICIAL_S: ${SERVICO_BACKOFF_INICIAL_S:-0.2}
+      SERVICO_BACKOFF_MAX_S: ${SERVICO_BACKOFF_MAX_S:-2}
+      DISJUNTOR_LIMITE_FALHAS: ${DISJUNTOR_LIMITE_FALHAS:-5}
+      DISJUNTOR_DESCANSO_S: ${DISJUNTOR_DESCANSO_S:-30}
     depends_on:
       redis: {condition: service_healthy}
       # So aceita trafego depois que a inferencia passou no healthcheck.

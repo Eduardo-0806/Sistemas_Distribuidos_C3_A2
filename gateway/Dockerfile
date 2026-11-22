@@ -14,7 +14,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install -r requirements.txt
 
-COPY app.py limitador.py ./
+COPY app.py limitador.py resiliencia.py ./
 
 RUN useradd --create-home --uid 10001 app
 USER app

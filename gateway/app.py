@@ -57,6 +57,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 
 from limitador import criar_limitador
+from resiliencia import Disjuntor, Retentativas
 
 
 def _env_obrigatoria(nome: str) -> str:
@@ -82,6 +83,35 @@ LIMITE_REQ_POR_MIN = int(os.getenv("LIMITE_REQ_POR_MIN", "30"))
 LIMITE_LOGIN_POR_MIN = int(os.getenv("LIMITE_LOGIN_POR_MIN", "10"))
 JANELA_LIMITE_S = 60
 limitador = criar_limitador(os.getenv("REDIS_URL", "").strip())
+
+
+def _env_int_positivo(nome: str, padrao: str) -> int:
+    valor = int(os.getenv(nome, padrao))
+    if valor < 1:
+        raise RuntimeError(f"{nome} precisa ser maior que zero")
+    return valor
+
+
+def _env_float_positivo(nome: str, padrao: str, permitir_zero: bool = False) -> float:
+    valor = float(os.getenv(nome, padrao))
+    if valor < 0 or (valor == 0 and not permitir_zero):
+        raise RuntimeError(f"{nome} precisa ser {'nao negativo' if permitir_zero else 'maior que zero'}")
+    return valor
+
+
+SERVICO_TIMEOUT_S = _env_float_positivo("SERVICO_TIMEOUT_S", "10")
+SERVICO_MAX_TENTATIVAS = _env_int_positivo("SERVICO_MAX_TENTATIVAS", "3")
+SERVICO_BACKOFF_INICIAL_S = _env_float_positivo("SERVICO_BACKOFF_INICIAL_S", "0.2", permitir_zero=True)
+SERVICO_BACKOFF_MAX_S = _env_float_positivo("SERVICO_BACKOFF_MAX_S", "2")
+DISJUNTOR_LIMITE_FALHAS = _env_int_positivo("DISJUNTOR_LIMITE_FALHAS", "5")
+DISJUNTOR_DESCANSO_S = _env_float_positivo("DISJUNTOR_DESCANSO_S", "30")
+retentativas = Retentativas(SERVICO_MAX_TENTATIVAS,
+                            SERVICO_BACKOFF_INICIAL_S,
+                            SERVICO_BACKOFF_MAX_S)
+disjuntores = {
+    nome: Disjuntor(DISJUNTOR_LIMITE_FALHAS, DISJUNTOR_DESCANSO_S)
+    for nome in SERVICOS
+}
 
 app = FastAPI(title="Gateway - C3.A2")
 
@@ -236,19 +266,56 @@ def _encaminhar(servico: str, metodo: str, caminho: str, response: Response,
     cabecalhos de rate limit definidos na dependencia continuem na resposta.
     """
     base = SERVICOS[servico]
-    try:
-        r = requests.request(metodo, f"{base}{caminho}", timeout=10, **kwargs)
-    except requests.RequestException as e:
+    disjuntor = disjuntores[servico]
+    if not disjuntor.permitir():
+        print(f"[gateway] disjuntor aberto para {servico}; falha rapida")
+        raise HTTPException(status_code=503,
+                            detail=f"servico de {servico} temporariamente indisponivel")
+
+    # GET e a busca vetorial sao seguras para repetir. Os POST /predict e
+    # /documentos podem criar efeitos duplicados se a resposta se perder.
+    pode_repetir = metodo.upper() == "GET" or (
+        metodo.upper() == "POST" and caminho == "/buscar")
+    tentativas = retentativas.max_tentativas if pode_repetir else 1
+    resposta_servico = None
+    erro_rede = None
+    for tentativa in range(1, tentativas + 1):
+        resposta_servico = None
+        try:
+            resposta_servico = requests.request(
+                metodo, f"{base}{caminho}", timeout=SERVICO_TIMEOUT_S,
+                **kwargs)
+            if resposta_servico.status_code not in (500, 502, 503, 504):
+                break
+            if tentativa < tentativas:
+                print(f"[gateway] {servico} respondeu {resposta_servico.status_code}; "
+                      f"retentativa {tentativa + 1}/{tentativas}")
+        except requests.RequestException as e:
+            erro_rede = e
+            if tentativa < tentativas:
+                print(f"[gateway] {servico} falhou ({type(e).__name__}); "
+                      f"retentativa {tentativa + 1}/{tentativas}")
+        if tentativa < tentativas:
+            retentativas.esperar(tentativa)
+
+    if resposta_servico is None:
+        disjuntor.falha()
         # Log so com o tipo do erro: a mensagem pode conter dados da requisicao.
-        print(f"[gateway] {servico} inacessivel: {type(e).__name__}")
+        print(f"[gateway] {servico} inacessivel: {type(erro_rede).__name__}")
         raise HTTPException(status_code=503,
                             detail=f"servico de {servico} indisponivel")
+
     try:
-        corpo = r.json()
+        corpo = resposta_servico.json()
     except ValueError:
+        disjuntor.falha()
         raise HTTPException(status_code=502,
                             detail=f"resposta invalida do servico de {servico}")
-    response.status_code = r.status_code
+    if resposta_servico.status_code >= 500:
+        disjuntor.falha()
+    else:
+        disjuntor.sucesso()
+    response.status_code = resposta_servico.status_code
     return corpo
 
 

@@ -35,6 +35,54 @@ python deploy/testar_deploy.py https://<url-publica> admin <senha>
 
 ---
 
+## Arquitetura
+
+```
+cliente --HTTPS--> gateway:8000 --HTTP--> inferencia:8001 --RPUSH--> Redis (fila "tarefas")
+                   (JWT, rate limit,  |                                  |
+                    timeout, retry,   |         worker (N réplicas) <--BLPOP
+                    circuit breaker)  |            grava resultado:<id> no Redis (TTL)
+                                      |
+                                      +--HTTP--> vetorial:8002 (índice em volume)
+
+            todos os serviços --OTLP--> Jaeger (rastreamento distribuído)
+```
+
+| Serviço | Papel |
+|---|---|
+| `gateway` | Única porta de entrada. Autentica (JWT), limita requisições por usuário/IP (contadores no Redis) e roteia para os serviços internos com tempo-limite, retentativa e circuit breaker. |
+| `inferencia` | Recebe o texto, enfileira a tarefa no Redis e devolve `202` com um `id`; consulta o resultado em `/resultado/{id}`. |
+| `worker` | Consome a fila (`BLPOP`), roda o modelo e grava o resultado com expiração. Escala horizontalmente: cada tarefa vai para um worker só. |
+| `vetorial` | Armazenamento vetorial: indexa documentos (TF-IDF), persiste o índice em volume e faz busca por similaridade. |
+| `redis` | Fila de tarefas, resultados (com TTL) e contadores do rate limit. |
+| `jaeger` | Recebe e exibe os traces (só no ambiente local). |
+
+**Comunicação:** REST síncrono entre gateway e serviços; mensageria assíncrona
+(fila no Redis) entre inferência e worker. Os serviços se encontram pelo nome
+(`http://inferencia:8001`), nunca por IP fixo.
+
+**Resiliência** (`gateway/resiliencia.py`, configurável no `.env`):
+- **Tempo-limite** em toda chamada interna (`SERVICO_TIMEOUT_S`, padrão 10 s).
+- **Retentativa com espera exponencial** (0,2 s → 0,4 s → ..., até `SERVICO_BACKOFF_MAX_S`)
+  só nas chamadas seguras de repetir (`GET /resultado` e `POST /buscar`). `POST /predict`
+  e `POST /documentos` não são repetidos para não duplicar tarefas/documentos.
+- **Circuit breaker por serviço:** após `DISJUNTOR_LIMITE_FALHAS` (5) falhas seguidas o
+  disjuntor abre e o gateway responde `503` na hora, sem chamar o serviço, por
+  `DISJUNTOR_DESCANSO_S` (30 s); depois deixa passar uma sondagem (meia-abertura).
+  Como há um disjuntor por serviço, a queda da inferência não afeta a busca vetorial.
+
+**Observabilidade:** todos os serviços são instrumentados com OpenTelemetry
+(`opentelemetry-instrument`). O contexto do trace viaja dentro da mensagem da
+fila, então um único trace cobre **gateway → inferência → fila (`fila.publicar`,
+`fila.espera`) → worker (`worker.processar`)**. Para ver: suba o compose, faça um
+`/predict` e abra <http://localhost:16686> (serviço `gateway`). A resposta do
+gateway traz o cabeçalho `X-Trace-Id` para achar o trace da requisição.
+
+Decisões e limitações (CAP, custo e latência) estão no
+[relatório de trade-offs](RELATORIO_TRADEOFFS.md).
+
+---
+
 ## Como executar do zero
 
 **Pré-requisito:** apenas [Docker](https://docs.docker.com/get-docker/) com o Compose
@@ -52,10 +100,11 @@ cp .env.example .env
 docker compose up --build
 ```
 
-Sobem 6 containers: `redis`, `inferencia`, `vetorial`, `gateway` e 2 réplicas de
-`worker`. O gateway só passa a aceitar requisições depois que a inferência e o
-armazenamento vetorial estão saudáveis.
-Apenas o gateway fica exposto, em `http://localhost:8000`.
+Sobem 7 containers: `redis`, `jaeger`, `inferencia`, `vetorial`, `gateway` e 2
+réplicas de `worker`. O gateway só passa a aceitar requisições depois que a
+inferência e o armazenamento vetorial estão saudáveis.
+A API fica exposta só pelo gateway, em `http://localhost:8000`; a interface do
+Jaeger (traces) fica em `http://localhost:16686`.
 
 ### Testando (sempre pelo gateway)
 
@@ -108,6 +157,31 @@ Publicação na nuvem: veja [deploy/INSTRUCOES.md](deploy/INSTRUCOES.md).
 
 ---
 
+## Conformidade (LGPD)
+
+A plataforma segue o princípio da **minimização**: guarda só o necessário para
+responder ao cliente, pelo menor tempo possível, e nada de conteúdo vai para logs.
+
+| Dado | Onde fica | Finalidade | Por quanto tempo |
+|---|---|---|---|
+| Texto enviado ao `/predict` | Redis, na fila `tarefas` | Ser classificado pelo worker | Até um worker consumir a tarefa (milissegundos com os workers no ar). Sai da fila no `BLPOP` e **não** é copiado para o resultado. Se nenhum worker estiver no ar, espera na fila até ser consumido. |
+| Resultado da inferência (`sentimento`, `confianca`, `status`, `tempo_ms`) | Redis, chave `resultado:<id>` | Permitir que o cliente consulte o resultado da tarefa assíncrona | `RESULTADO_TTL_S` (padrão **1 hora**); depois o Redis apaga sozinho e a consulta devolve `404`. |
+| Pergunta do `/buscar` | Só na memória durante a requisição | Calcular a similaridade | Não é armazenada. |
+| Documentos enviados ao `/documentos` (`texto`, `origem`) | Volume do serviço vetorial (`/dados/indice.json`) | Compor a base de busca | Até serem removidos pelo administrador (`docker compose down -v` ou remoção do volume no Railway). A base é de conteúdo técnico: **não indexe dados pessoais**. |
+| Usuário e senha do `/login` | Comparados em memória com `AUTH_USUARIO`/`AUTH_SENHA` (variáveis de ambiente) | Autenticação | Nunca gravados nem logados. |
+| Token JWT (contém o usuário em `sub`) | Só com o cliente; o servidor não guarda tokens | Autorizar as rotas protegidas | Expira em `JWT_EXPIRACAO_MIN` (padrão **30 min**). |
+| Usuário e IP para o rate limit | Redis, como **HMAC-SHA256** (nunca em claro) | Limitar abuso e força bruta no login | Uma chave por janela de 60 s; o Redis a apaga sozinho em no máximo ~2 min. |
+| Logs dos serviços | Saída padrão dos containers | Operação e diagnóstico | Só método, rota, status, tempo e id da tarefa — **sem texto e sem IP** (o log de acesso do uvicorn, que gravaria o IP, está desligado). Ficam enquanto o container existir (local) ou pelo período de retenção de logs do plano no Railway. |
+| Traces (OpenTelemetry/Jaeger) | Jaeger local | Diagnóstico de latência e falhas | Rota, status, duração, id da tarefa e user-agent; comandos do Redis vão sanitizados (sem valores). O Jaeger do compose guarda em memória: some ao reiniciar o container. |
+
+Além disso: só o gateway é exposto, com **HTTPS** no deploy público; os demais
+serviços ficam na rede interna. Segredos (`JWT_SEGREDO`, `AUTH_SENHA`) ficam em
+variáveis de ambiente e o `.env` está no `.gitignore`. O proxy de borda do
+Railway pode registrar IPs em seus próprios logs de plataforma, fora do controle
+da aplicação.
+
+---
+
 ## Estrutura do projeto
 
 ```
@@ -130,6 +204,7 @@ Sistemas_Distribuidos_C3_A2/
 ├── comum/                  # modelo e fila (compartilhados por inferência e worker)
 ├── deploy/                 # passo a passo do Railway + testar_deploy.py
 ├── docker-compose.yml      # o sistema inteiro com um comando
+├── RELATORIO_TRADEOFFS.md  # CAP, custo e latência
 └── TAREFAS.md
 ```
 

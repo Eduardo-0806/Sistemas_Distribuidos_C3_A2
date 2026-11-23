@@ -27,10 +27,10 @@ Este e o projeto integrador. Reaproveite o que voce fez em C1.A2 e C2.A2.
 
 - [x] **8. HTTPS** no servico publicado. (Aula 16)
 
-- [ ] **9. Secao de conformidade no README**
+- [x] **9. Secao de conformidade no README**
       Quais dados sao tratados, com qual finalidade e por quanto tempo. (LGPD, Aula 16)
 
-- [ ] **10. Relatorio de trade-offs**
+- [x] **10. Relatorio de trade-offs**
       CAP, custo e latencia do seu sistema.
 
 ## Extensoes opcionais
@@ -43,7 +43,7 @@ Este e o projeto integrador. Reaproveite o que voce fez em C1.A2 e C2.A2.
 
 ## Antes de entregar
 
-- [ ] Clone em OUTRA maquina e rode o comando unico - funciona?
+- [x] Clone em OUTRA maquina e rode o comando unico - funciona?
 - [x] A URL publica esta no ar?
-- [ ] Toda configuracao esta em variavel de ambiente (nada fixo no codigo)?
-- [ ] Os logs estao livres de dados pessoais?
+- [x] Toda configuracao esta em variavel de ambiente (nada fixo no codigo)?
+- [x] Os logs estao livres de dados pessoais?
